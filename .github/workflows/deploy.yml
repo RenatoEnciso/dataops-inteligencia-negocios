@@ -1,0 +1,118 @@
+name: Build and Deploy DACPAC
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+
+  build:
+    name: Build DACPAC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Instalar dotnet
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build del proyecto SQL
+        run: dotnet build CajaTrujillo.DbSchema/CajaTrujillo.DbSchema.sqlproj --configuration Release
+
+      - name: Subir DACPAC como artefacto del pipeline
+        uses: actions/upload-artifact@v4
+        with:
+          name: dacpac
+          path: CajaTrujillo.DbSchema/bin/Release/*.dacpac
+
+  deploy-dev:
+    name: Deploy a DEV
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar DACPAC
+        uses: actions/download-artifact@v4
+        with:
+          name: dacpac
+          path: ./dacpac
+
+      - name: Instalar sqlpackage
+        run: |
+          dotnet tool install -g microsoft.sqlpackage
+          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+
+      - name: Comparar esquema y aplicar cambios en GitDev
+        run: |
+          sqlpackage /Action:Publish \
+            /SourceFile:./dacpac/CajaTrujillo.DbSchema.dacpac \
+            /TargetServerName:"${{ secrets.SQL_SERVER }}" \
+            /TargetDatabaseName:"GitDev" \
+            /TargetUser:"${{ secrets.SQL_USER }}" \
+            /TargetPassword:"${{ secrets.SQL_PASSWORD }}" \
+            /TargetTrustServerCertificate:True
+
+      - name: Generar reporte de cambios aplicados
+        if: always()
+        run: |
+          sqlpackage /Action:DeployReport \
+            /SourceFile:./dacpac/CajaTrujillo.DbSchema.dacpac \
+            /TargetServerName:"${{ secrets.SQL_SERVER }}" \
+            /TargetDatabaseName:"GitDev" \
+            /TargetUser:"${{ secrets.SQL_USER }}" \
+            /TargetPassword:"${{ secrets.SQL_PASSWORD }}" \
+            /TargetTrustServerCertificate:True \
+            /OutputPath:./deploy-report-dev.xml
+
+      - name: Subir reporte DEV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-report-dev
+          path: ./deploy-report-dev.xml
+
+  deploy-prod:
+    name: Deploy a PROD
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Descargar DACPAC
+        uses: actions/download-artifact@v4
+        with:
+          name: dacpac
+          path: ./dacpac
+
+      - name: Instalar sqlpackage
+        run: |
+          dotnet tool install -g microsoft.sqlpackage
+          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+
+      - name: Generar preview de cambios antes de aplicar en GitProd
+        run: |
+          sqlpackage /Action:Script \
+            /SourceFile:./dacpac/CajaTrujillo.DbSchema.dacpac \
+            /TargetServerName:"${{ secrets.SQL_SERVER }}" \
+            /TargetDatabaseName:"GitProd" \
+            /TargetUser:"${{ secrets.SQL_USER }}" \
+            /TargetPassword:"${{ secrets.SQL_PASSWORD }}" \
+            /TargetTrustServerCertificate:True \
+            /OutputPath:./preview-prod.sql
+
+      - name: Subir preview de PROD para revisión
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-prod-script
+          path: ./preview-prod.sql
+
+      - name: Comparar esquema y aplicar cambios en GitProd
+        run: |
+          sqlpackage /Action:Publish \
+            /SourceFile:./dacpac/CajaTrujillo.DbSchema.dacpac \
+            /TargetServerName:"${{ secrets.SQL_SERVER }}" \
+            /TargetDatabaseName:"GitProd" \
+            /TargetUser:"${{ secrets.SQL_USER }}" \
+            /TargetPassword:"${{ secrets.SQL_PASSWORD }}" \
+            /TargetTrustServerCertificate:True
